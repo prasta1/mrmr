@@ -49,13 +49,19 @@ func main() {
 func run(args []string) error {
 	fs := flag.NewFlagSet("models-watcher", flag.ContinueOnError)
 	mrmrURL := fs.String("mrmr", "http://localhost:4242/api/events", "mrmr ingest URL")
-	endpointURL := fs.String("endpoint", "http://100.68.81.83:8999/v1/models", "OpenAI-compatible /v1/models endpoint to watch")
+	endpointURL := fs.String("endpoint", "", "OpenAI-compatible /v1/models endpoint to watch (required)")
 	// Scopes this instance's dedup namespace. Two watchers sharing one name
 	// would collide at the RFC3339 second; defaults to the endpoint host.
 	name := fs.String("name", "", "source name for this endpoint (default: endpoint host)")
 	poll := fs.Duration("poll", 90*time.Second, "poll interval")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+
+	// Required rather than defaulted: any default is a guess at someone
+	// else's port, and a wrong one polls silently instead of failing.
+	if *endpointURL == "" {
+		return fmt.Errorf("-endpoint is required")
 	}
 
 	// Default the source name to the endpoint host so two watchers are
