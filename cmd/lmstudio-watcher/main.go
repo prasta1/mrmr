@@ -47,7 +47,7 @@ func main() {
 func run(args []string) error {
 	fs := flag.NewFlagSet("lmstudio-watcher", flag.ContinueOnError)
 	mrmrURL := fs.String("mrmr", "http://localhost:4242/api/events", "mrmr ingest URL")
-	lmStudioURL := fs.String("lmstudio", "http://studio.taile85139.ts.net:1234/v1/models", "LM Studio /v1/models endpoint")
+	lmStudioURL := fs.String("lmstudio", "http://100.68.81.83:8999/v1/models", "OpenAI-compatible /v1/models endpoint to watch")
 	poll := fs.Duration("poll", 90*time.Second, "poll interval")
 	if err := fs.Parse(args); err != nil {
 		return err
