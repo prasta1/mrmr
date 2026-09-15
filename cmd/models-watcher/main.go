@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -16,7 +17,7 @@ import (
 	"github.com/heath0xff/mrmr/internal/event"
 )
 
-// modelsResponse is the OpenAI-compatible /v1/models shape LM Studio serves.
+// modelsResponse is the OpenAI-compatible /v1/models shape.
 type modelsResponse struct {
 	Object string       `json:"object"`
 	Data   []modelEntry `json:"data"`
@@ -29,9 +30,10 @@ type modelEntry struct {
 	OwnedBy string `json:"owned_by"`
 }
 
-// snapshot is the normalized LM Studio state for diffing.
+// snapshot is the normalized endpoint state for diffing.
 type snapshot struct {
 	URL         string
+	Name        string
 	Reachable   bool
 	ModelIDs    []string
 	CheckedAt   time.Time
@@ -45,12 +47,25 @@ func main() {
 }
 
 func run(args []string) error {
-	fs := flag.NewFlagSet("lmstudio-watcher", flag.ContinueOnError)
+	fs := flag.NewFlagSet("models-watcher", flag.ContinueOnError)
 	mrmrURL := fs.String("mrmr", "http://localhost:4242/api/events", "mrmr ingest URL")
-	lmStudioURL := fs.String("lmstudio", "http://100.68.81.83:8999/v1/models", "OpenAI-compatible /v1/models endpoint to watch")
+	endpointURL := fs.String("endpoint", "http://100.68.81.83:8999/v1/models", "OpenAI-compatible /v1/models endpoint to watch")
+	// Scopes this instance's dedup namespace. Two watchers sharing one name
+	// would collide at the RFC3339 second; defaults to the endpoint host.
+	name := fs.String("name", "", "source name for this endpoint (default: endpoint host)")
 	poll := fs.Duration("poll", 90*time.Second, "poll interval")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+
+	// Default the source name to the endpoint host so two watchers are
+	// distinct without extra config.
+	if *name == "" {
+		if u, err := url.Parse(*endpointURL); err == nil && u.Host != "" {
+			*name = u.Host
+		} else {
+			*name = "models"
+		}
 	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
@@ -58,17 +73,18 @@ func run(args []string) error {
 	ticker := time.NewTicker(*poll)
 	defer ticker.Stop()
 
-	log.Printf("lmstudio-watcher started: lmstudio=%s mrmr=%s poll=%s", *lmStudioURL, *mrmrURL, poll)
+	log.Printf("models-watcher started: name=%s endpoint=%s mrmr=%s poll=%s", *name, *endpointURL, *mrmrURL, poll)
 
 	for {
 		now := time.Now().UTC()
-		cur, err := fetchSnapshot(*lmStudioURL)
+		cur, err := fetchSnapshot(*endpointURL)
 		if err != nil {
 			cur = &snapshot{Reachable: false, ErrorDetail: err.Error(), CheckedAt: now}
 		} else {
 			cur.CheckedAt = now
 		}
-		cur.URL = *lmStudioURL
+		cur.URL = *endpointURL
+		cur.Name = *name
 
 		events := diffSnapshot(last, cur, now)
 		for _, ev := range events {
@@ -97,12 +113,12 @@ func fetchSnapshot(url string) (*snapshot, error) {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("lmstudio unreachable: %w", err)
+		return nil, fmt.Errorf("endpoint unreachable: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("lmstudio returned %d", resp.StatusCode)
+		return nil, fmt.Errorf("endpoint returned %d", resp.StatusCode)
 	}
 
 	var models modelsResponse
@@ -135,14 +151,14 @@ func diffSnapshot(prev, cur *snapshot, now time.Time) []event.Event {
 	var events []event.Event
 
 	if !prev.Reachable && cur.Reachable {
-		events = append(events, lmEvent("lmstudio.server.recovered", cur, now, "LM Studio reachable", map[string]any{
+		events = append(events, endpointEvent("inference.server.recovered", cur, now, "endpoint reachable", map[string]any{
 			"loaded_models": cur.ModelIDs,
 			"model_count":   len(cur.ModelIDs),
 		}))
 	}
 
 	if prev.Reachable && !cur.Reachable {
-		events = append(events, lmEvent("lmstudio.server.unreachable", cur, now, "LM Studio unreachable", map[string]any{
+		events = append(events, endpointEvent("inference.server.unreachable", cur, now, "endpoint unreachable", map[string]any{
 			"error": cur.ErrorDetail,
 		}))
 	}
@@ -153,7 +169,7 @@ func diffSnapshot(prev, cur *snapshot, now time.Time) []event.Event {
 
 		for _, id := range cur.ModelIDs {
 			if !prevSet[id] {
-				events = append(events, lmEvent("lmstudio.model.loaded", cur, now, "model loaded", map[string]any{
+				events = append(events, endpointEvent("inference.model.loaded", cur, now, "model loaded", map[string]any{
 					"model_id":      id,
 					"loaded_models": cur.ModelIDs,
 					"model_count":   len(cur.ModelIDs),
@@ -162,7 +178,7 @@ func diffSnapshot(prev, cur *snapshot, now time.Time) []event.Event {
 		}
 		for _, id := range prev.ModelIDs {
 			if !curSet[id] {
-				events = append(events, lmEvent("lmstudio.model.unloaded", cur, now, "model unloaded", map[string]any{
+				events = append(events, endpointEvent("inference.model.unloaded", cur, now, "model unloaded", map[string]any{
 					"model_id":      id,
 					"loaded_models": cur.ModelIDs,
 					"model_count":   len(cur.ModelIDs),
@@ -171,7 +187,7 @@ func diffSnapshot(prev, cur *snapshot, now time.Time) []event.Event {
 		}
 
 		if len(prev.ModelIDs) != len(cur.ModelIDs) {
-			events = append(events, lmEvent("lmstudio.models.changed", cur, now, "model count changed", map[string]any{
+			events = append(events, endpointEvent("inference.models.changed", cur, now, "model count changed", map[string]any{
 				"prev_count":    len(prev.ModelIDs),
 				"model_count":   len(cur.ModelIDs),
 				"loaded_models": cur.ModelIDs,
@@ -184,11 +200,11 @@ func diffSnapshot(prev, cur *snapshot, now time.Time) []event.Event {
 
 func initialEvents(cur *snapshot, now time.Time) []event.Event {
 	if !cur.Reachable {
-		return []event.Event{lmEvent("lmstudio.server.unreachable", cur, now, "LM Studio unreachable on first check", map[string]any{
+		return []event.Event{endpointEvent("inference.server.unreachable", cur, now, "endpoint unreachable on first check", map[string]any{
 			"error": cur.ErrorDetail,
 		})}
 	}
-	return []event.Event{lmEvent("lmstudio.server.recovered", cur, now, "LM Studio reachable on first check", map[string]any{
+	return []event.Event{endpointEvent("inference.server.recovered", cur, now, "endpoint reachable on first check", map[string]any{
 		"loaded_models": cur.ModelIDs,
 		"model_count":   len(cur.ModelIDs),
 	})}
@@ -202,9 +218,9 @@ func set(ids []string) map[string]bool {
 	return m
 }
 
-func lmEvent(typ string, snap *snapshot, now time.Time, summary string, extra map[string]any) event.Event {
+func endpointEvent(typ string, snap *snapshot, now time.Time, summary string, extra map[string]any) event.Event {
 	data := map[string]any{
-		"lmstudio_url":  snap.URL,
+		"endpoint_url":  snap.URL,
 		"reachable":     snap.Reachable,
 		"loaded_models": snap.ModelIDs,
 		"model_count":   len(snap.ModelIDs),
@@ -220,12 +236,12 @@ func lmEvent(typ string, snap *snapshot, now time.Time, summary string, extra ma
 	return event.Event{
 		ID:        event.NewID("evt_"),
 		Type:      typ,
-		Source:    "lmstudio",
+		Source:    snap.Name,
 		Subject:   snap.URL,
 		Timestamp: now,
 		Data:      data,
 		Metadata: map[string]any{
-			"source_event_id": typ + ":lmstudio:" + now.Format(time.RFC3339),
+			"source_event_id": typ + ":" + snap.Name + ":" + now.Format(time.RFC3339),
 		},
 	}
 }
