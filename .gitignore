@@ -14,3 +14,8 @@ testdata/real-eval*.jsonl
 # Test/editor artifacts
 coverage.out
 .DS_Store
+
+# Local binaries, logs, and database backups
+/bin/
+/var/
+/docs/
