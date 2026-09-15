@@ -31,6 +31,7 @@ type modelEntry struct {
 
 // snapshot is the normalized LM Studio state for diffing.
 type snapshot struct {
+	URL         string
 	Reachable   bool
 	ModelIDs    []string
 	CheckedAt   time.Time
@@ -67,6 +68,7 @@ func run(args []string) error {
 		} else {
 			cur.CheckedAt = now
 		}
+		cur.URL = *lmStudioURL
 
 		events := diffSnapshot(last, cur, now)
 		for _, ev := range events {
@@ -202,7 +204,7 @@ func set(ids []string) map[string]bool {
 
 func lmEvent(typ string, snap *snapshot, now time.Time, summary string, extra map[string]any) event.Event {
 	data := map[string]any{
-		"lmstudio_url":  "",
+		"lmstudio_url":  snap.URL,
 		"reachable":     snap.Reachable,
 		"loaded_models": snap.ModelIDs,
 		"model_count":   len(snap.ModelIDs),
@@ -219,7 +221,7 @@ func lmEvent(typ string, snap *snapshot, now time.Time, summary string, extra ma
 		ID:        event.NewID("evt_"),
 		Type:      typ,
 		Source:    "lmstudio",
-		Subject:   "studio.taile85139.ts.net:1234",
+		Subject:   snap.URL,
 		Timestamp: now,
 		Data:      data,
 		Metadata: map[string]any{
